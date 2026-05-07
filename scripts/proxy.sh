@@ -1,6 +1,6 @@
 #!/bin/bash
 
-SCRIPT_PATH="$HOME/proxy.sh"
+SCRIPT_PATH="$HOME/toolbox/scripts/proxy.sh"
 CONFIG_FILE="$HOME/.proxy_config"
 PID_FILE="$HOME/.ssh_proxy.pid"
 
@@ -124,6 +124,50 @@ configure() {
     echo "✅ 配置已保存"
 }
 
+setup_ssh_key() {
+    load_config
+    echo ""
+    echo "🔑 配置 SSH 密钥免密登录"
+
+    if [ -z "$REMOTE_HOST" ]; then
+        echo "❌ 未配置远程主机，请先修改配置"
+        return 1
+    fi
+
+    mkdir -p "$HOME/.ssh"
+    chmod 700 "$HOME/.ssh"
+
+    # 没有密钥就生成
+    if [ ! -f "$HOME/.ssh/id_ed25519" ]; then
+        echo "📝 生成 SSH 密钥..."
+        ssh-keygen -t ed25519 -N "" -f "$HOME/.ssh/id_ed25519" -C "$(hostname)"
+        echo "✅ 密钥已生成"
+    else
+        echo "✅ 已有 SSH 密钥，跳过生成"
+    fi
+
+    echo "📤 上传公钥到 $REMOTE_HOST（需要输入一次密码）..."
+    if command -v ssh-copy-id >/dev/null 2>&1; then
+        ssh-copy-id -i "$HOME/.ssh/id_ed25519.pub" \
+            -p "$REMOTE_PORT" \
+            "$REMOTE_USER@$REMOTE_HOST"
+    else
+        cat "$HOME/.ssh/id_ed25519.pub" | ssh \
+            -p "$REMOTE_PORT" \
+            -o StrictHostKeyChecking=no \
+            "$REMOTE_USER@$REMOTE_HOST" \
+            'mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && cat >> ~/.ssh/authorized_keys'
+    fi
+
+    if [ $? -eq 0 ]; then
+        echo "✅ 密钥上传成功，之后无需密码"
+    else
+        echo "❌ 上传失败，可手动执行："
+        echo "   ssh-copy-id -i ~/.ssh/id_ed25519.pub -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST"
+    fi
+}
+
+
 # ─── 设置别名 ────────────────────────────────────
 setup_aliases() {
     load_config
@@ -151,6 +195,7 @@ setup_aliases() {
 
 _write_aliases() {
     local BASHRC="$HOME/.bashrc"
+    touch "$BASHRC"
     # 清除旧别名
     sed -i '/# PROXY_ALIAS/d' "$BASHRC"
     # 写入新别名
@@ -158,10 +203,18 @@ _write_aliases() {
     echo "alias $ALIAS_OFF=\"source $SCRIPT_PATH stop\" # PROXY_ALIAS" >> "$BASHRC"
     echo "alias $ALIAS_ST=\"source $SCRIPT_PATH status\" # PROXY_ALIAS" >> "$BASHRC"
     echo "alias pxy=\"source $SCRIPT_PATH menu\" # PROXY_ALIAS" >> "$BASHRC"
-    source "$BASHRC"
+
+    alias "$ALIAS_ON=source $SCRIPT_PATH start"
+    alias "$ALIAS_OFF=source $SCRIPT_PATH stop"
+    alias "$ALIAS_ST=source $SCRIPT_PATH status"
+    alias "pxy=source $SCRIPT_PATH menu"
+
     echo ""
     echo "✅ 别名已写入并生效："
     echo "   $ALIAS_ON / $ALIAS_OFF / $ALIAS_ST / pxy"
+    echo ""
+    echo "如当前终端还识别不了 pxy，请执行："
+    echo "   source ~/.bashrc"
 }
 
 # ─── 主菜单 ──────────────────────────────────────
@@ -177,6 +230,7 @@ menu() {
         echo "║  3. 查看状态 / 测试连通       ║"
         echo "║  4. 修改配置 (IP / 端口)      ║"
         echo "║  5. 修改别名                  ║"
+        echo "║  6. 上传 SSH 密钥             ║"
         echo "║  0. 退出                      ║"
         echo "╚═══════════════════════════════╝"
         echo ""
@@ -187,6 +241,7 @@ menu() {
             3) status ;;
             4) configure ;;
             5) setup_aliases ;;
+            6) setup_ssh_key ;;
             0) break ;;
             *) echo "无效选项" ;;
         esac
@@ -201,6 +256,7 @@ init() {
     echo "═══════════════════════"
     configure
     echo ""
+    setup_ssh_key
     setup_aliases
     echo ""
     echo "🎉 完成！常用命令："
@@ -218,5 +274,11 @@ case "$1" in
     status) load_config; status ;;
     menu)   menu ;;
     init)   init ;;
-    *)      menu ;;
+    *)
+        if [ ! -f "$CONFIG_FILE" ]; then
+            init
+        else
+            menu
+        fi
+        ;;
 esac
