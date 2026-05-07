@@ -6,8 +6,7 @@
 ## 快速开始
 
 ```bash
-bash <(curl -s
-https://raw.githubusercontent.com/xiu14/toolbox/main/install.sh)
+curl -fsSL https://raw.githubusercontent.com/xiu14/toolbox/main/install.sh | bash
 ```
 
 ## 包含工具

@@ -52,8 +52,10 @@ install_script() {
     fi
 
     chmod +x "$target"
-    echo "🔧 初始化 $filename ..."
-    source "$target" init
+    if [ "$filename" = "proxy.sh" ]; then
+        echo "🔧 初始化 $filename ..."
+        source "$target" init
+    fi
     echo "✅ $filename 安装完成"
     echo ""
 }
