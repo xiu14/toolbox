@@ -3,6 +3,7 @@
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s\n' "${BASH_SOURCE[0]}")"
 CONFIG_FILE="$HOME/.proxy_config"
 PID_FILE="$HOME/.ssh_proxy.pid"
+MONITOR_PID_FILE="$HOME/.ssh_proxy_monitor.pid"
 
 # ─── 读取 / 保存配置 ──────────────────────────────
 load_config() {
@@ -32,43 +33,107 @@ EOF
 }
 
 # ─── 代理核心 ────────────────────────────────────
+notify_disconnected() {
+    local message="⚠️ SSH 代理已断开，请运行 $ALIAS_ON 或 pxy 重新连接"
+
+    if [ -w /dev/tty ]; then
+        printf '\n%s\n' "$message" > /dev/tty
+    else
+        printf '\n%s\n' "$message"
+    fi
+
+    if command -v termux-notification >/dev/null 2>&1; then
+        termux-notification --title "SSH 代理已断开" --content "请运行 $ALIAS_ON 或 pxy 重新连接" >/dev/null 2>&1
+    elif command -v termux-toast >/dev/null 2>&1; then
+        termux-toast "SSH 代理已断开" >/dev/null 2>&1
+    fi
+}
+
+start_monitor() {
+    local ssh_pid="$1"
+
+    if [ -f "$MONITOR_PID_FILE" ]; then
+        kill "$(cat "$MONITOR_PID_FILE")" 2>/dev/null
+        rm -f "$MONITOR_PID_FILE"
+    fi
+
+    (
+        while true; do
+            sleep 5
+
+            if [ ! -f "$PID_FILE" ]; then
+                exit 0
+            fi
+
+            if [ "$(cat "$PID_FILE" 2>/dev/null)" != "$ssh_pid" ]; then
+                exit 0
+            fi
+
+            if ! kill -0 "$ssh_pid" 2>/dev/null; then
+                load_config
+                rm -f "$PID_FILE" "$MONITOR_PID_FILE"
+                notify_disconnected
+                exit 0
+            fi
+        done
+    ) &
+
+    echo "$!" > "$MONITOR_PID_FILE"
+}
+
 start() {
     load_config
+    local ssh_pid
+
     if [ -z "$REMOTE_HOST" ]; then
         echo "❌ 未配置远程主机，请先运行 pxy → 修改配置"
         return 1
     fi
 
     pkill -f "ssh -D $LOCAL_PORT" 2>/dev/null
-    rm -f "$PID_FILE"
+    if [ -f "$MONITOR_PID_FILE" ]; then
+        kill "$(cat "$MONITOR_PID_FILE")" 2>/dev/null
+    fi
+    rm -f "$PID_FILE" "$MONITOR_PID_FILE"
     sleep 1
 
-    ssh -D $LOCAL_PORT -N -f \
-        -p $REMOTE_PORT \
+    ssh -D "$LOCAL_PORT" -N -f \
+        -p "$REMOTE_PORT" \
         -o StrictHostKeyChecking=no \
         -o ServerAliveInterval=30 \
         -o ServerAliveCountMax=3 \
         -o ExitOnForwardFailure=yes \
-        $REMOTE_USER@$REMOTE_HOST
+        "$REMOTE_USER@$REMOTE_HOST"
 
     if [ $? -ne 0 ]; then
         echo "❌ SSH 连接失败，请检查 IP / 端口 / 密钥"
         return 1
     fi
 
-    pgrep -f "ssh -D $LOCAL_PORT" > "$PID_FILE"
+    ssh_pid="$(pgrep -f "ssh -D $LOCAL_PORT" | tail -n 1)"
+    if [ -z "$ssh_pid" ]; then
+        echo "❌ SSH 已返回成功，但未找到代理进程"
+        return 1
+    fi
+
+    echo "$ssh_pid" > "$PID_FILE"
+    start_monitor "$ssh_pid"
 
     export http_proxy=socks5://127.0.0.1:$LOCAL_PORT
     export https_proxy=socks5://127.0.0.1:$LOCAL_PORT
     export ALL_PROXY=socks5://127.0.0.1:$LOCAL_PORT
 
-    echo "✅ 代理已启动，端口 $LOCAL_PORT"
+    echo "✅ 代理已启动，端口 $LOCAL_PORT，断开时会提示"
 }
 
 stop() {
     load_config
+    if [ -f "$MONITOR_PID_FILE" ]; then
+        kill "$(cat "$MONITOR_PID_FILE")" 2>/dev/null
+        rm -f "$MONITOR_PID_FILE"
+    fi
     if [ -f "$PID_FILE" ]; then
-        kill $(cat "$PID_FILE") 2>/dev/null
+        kill "$(cat "$PID_FILE")" 2>/dev/null
         rm -f "$PID_FILE"
     fi
     pkill -f "ssh -D $LOCAL_PORT" 2>/dev/null
@@ -79,7 +144,7 @@ stop() {
 status() {
     load_config
     echo ""
-    if [ -f "$PID_FILE" ] && kill -0 $(cat "$PID_FILE") 2>/dev/null; then
+    if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
         echo "🟢 代理运行中 (PID: $(cat $PID_FILE))"
         echo "📡 测试连通性..."
         RESULT=$(curl -s --max-time 5 --proxy socks5h://127.0.0.1:$LOCAL_PORT https://ip.sb)
