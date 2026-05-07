@@ -1,6 +1,6 @@
 #!/bin/bash
 
-SCRIPT_PATH="$HOME/toolbox/scripts/proxy.sh"
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s\n' "${BASH_SOURCE[0]}")"
 CONFIG_FILE="$HOME/.proxy_config"
 PID_FILE="$HOME/.ssh_proxy.pid"
 
