@@ -1,6 +1,6 @@
 #!/bin/bash
 
-GITHUB_USER="你的用户名"
+GITHUB_USER="xiu14"
 GITHUB_REPO="toolbox"
 GITHUB_BRANCH="main"
 SCRIPTS_DIR="scripts"
