@@ -4,20 +4,27 @@ SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s\n' "${B
 CONFIG_FILE="$HOME/.proxy_config"
 PID_FILE="$HOME/.ssh_proxy.pid"
 MONITOR_PID_FILE="$HOME/.ssh_proxy_monitor.pid"
+REDSOCKS_PID_FILE="$HOME/.ssh_proxy_redsocks.pid"
+REDSOCKS_CONF_FILE="$HOME/.ssh_proxy_redsocks.conf"
+IPTABLES_CHAIN="SSH_PROXY"
+
+set_defaults() {
+    REMOTE_USER="${REMOTE_USER:-root}"
+    REMOTE_HOST="${REMOTE_HOST:-}"
+    REMOTE_PORT="${REMOTE_PORT:-22}"
+    LOCAL_PORT="${LOCAL_PORT:-1080}"
+    REDSOCKS_PORT="${REDSOCKS_PORT:-12345}"
+    ALIAS_ON="${ALIAS_ON:-pon}"
+    ALIAS_OFF="${ALIAS_OFF:-poff}"
+    ALIAS_ST="${ALIAS_ST:-pst}"
+}
 
 # ─── 读取 / 保存配置 ──────────────────────────────
 load_config() {
     if [ -f "$CONFIG_FILE" ]; then
         source "$CONFIG_FILE"
-    else
-        REMOTE_USER="root"
-        REMOTE_HOST=""
-        REMOTE_PORT="22"
-        LOCAL_PORT="1080"
-        ALIAS_ON="pon"
-        ALIAS_OFF="poff"
-        ALIAS_ST="pst"
     fi
+    set_defaults
 }
 
 save_config() {
@@ -26,6 +33,7 @@ REMOTE_USER="$REMOTE_USER"
 REMOTE_HOST="$REMOTE_HOST"
 REMOTE_PORT="$REMOTE_PORT"
 LOCAL_PORT="$LOCAL_PORT"
+REDSOCKS_PORT="$REDSOCKS_PORT"
 ALIAS_ON="$ALIAS_ON"
 ALIAS_OFF="$ALIAS_OFF"
 ALIAS_ST="$ALIAS_ST"
@@ -122,15 +130,21 @@ start() {
     echo "$ssh_pid" > "$PID_FILE"
     start_monitor "$ssh_pid"
 
-    export http_proxy=socks5://127.0.0.1:$LOCAL_PORT
-    export https_proxy=socks5://127.0.0.1:$LOCAL_PORT
-    export ALL_PROXY=socks5://127.0.0.1:$LOCAL_PORT
+    export http_proxy=socks5h://127.0.0.1:$LOCAL_PORT
+    export https_proxy=socks5h://127.0.0.1:$LOCAL_PORT
+    export all_proxy=socks5h://127.0.0.1:$LOCAL_PORT
+    export HTTP_PROXY=socks5h://127.0.0.1:$LOCAL_PORT
+    export HTTPS_PROXY=socks5h://127.0.0.1:$LOCAL_PORT
+    export ALL_PROXY=socks5h://127.0.0.1:$LOCAL_PORT
 
     echo "✅ 代理已启动，端口 $LOCAL_PORT，断开时会提示"
 }
 
 stop() {
     load_config
+    if ! is_termux; then
+        global_stop
+    fi
     if [ -f "$MONITOR_PID_FILE" ]; then
         kill "$(cat "$MONITOR_PID_FILE")" 2>/dev/null
         rm -f "$MONITOR_PID_FILE"
@@ -140,8 +154,196 @@ stop() {
         rm -f "$PID_FILE"
     fi
     pkill -f "ssh -D $LOCAL_PORT" 2>/dev/null
-    unset http_proxy https_proxy ALL_PROXY
+    unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
     echo "🔴 代理已关闭"
+}
+
+is_termux() {
+    case "$PREFIX" in
+        *com.termux*) return 0 ;;
+    esac
+    [ -d /data/data/com.termux/files/usr ]
+}
+
+run_root() {
+    if [ "$(id -u)" -eq 0 ]; then
+        "$@"
+    elif command -v sudo >/dev/null 2>&1; then
+        sudo "$@"
+    else
+        echo "❌ 全局模式需要 root 权限或 sudo"
+        return 1
+    fi
+}
+
+global_requirements_ok() {
+    if is_termux; then
+        echo "❌ 当前是 Termux/Android 环境，已跳过 Linux 全局模式"
+        echo "   Android 建议使用 VPN/TUN 模式代理工具；这个脚本只在默认 Linux 环境启用透明代理。"
+        return 1
+    fi
+
+    if ! command -v redsocks >/dev/null 2>&1; then
+        echo "❌ 缺少 redsocks"
+        echo "   Debian/Ubuntu: sudo apt install redsocks"
+        echo "   Arch: sudo pacman -S redsocks"
+        return 1
+    fi
+
+    if ! command -v iptables >/dev/null 2>&1; then
+        echo "❌ 缺少 iptables"
+        return 1
+    fi
+
+    return 0
+}
+
+write_redsocks_config() {
+    cat > "$REDSOCKS_CONF_FILE" << EOF
+base {
+    log_debug = off;
+    log_info = off;
+    log = "stderr";
+    daemon = on;
+    redirector = iptables;
+}
+
+redsocks {
+    local_ip = 0.0.0.0;
+    local_port = $REDSOCKS_PORT;
+    ip = 127.0.0.1;
+    port = $LOCAL_PORT;
+    type = socks5;
+}
+EOF
+}
+
+start_redsocks() {
+    if [ -f "$REDSOCKS_PID_FILE" ]; then
+        kill "$(cat "$REDSOCKS_PID_FILE")" 2>/dev/null
+        rm -f "$REDSOCKS_PID_FILE"
+    fi
+
+    pkill -f "redsocks.*$REDSOCKS_CONF_FILE" 2>/dev/null
+    write_redsocks_config
+    redsocks -c "$REDSOCKS_CONF_FILE" -p "$REDSOCKS_PID_FILE"
+}
+
+iptables_insert_once() {
+    if ! run_root iptables -t nat -C "$@" >/dev/null 2>&1; then
+        run_root iptables -t nat -I "$@"
+    fi
+}
+
+setup_iptables_global() {
+    run_root iptables -t nat -N "$IPTABLES_CHAIN" >/dev/null 2>&1 || true
+    run_root iptables -t nat -F "$IPTABLES_CHAIN"
+
+    run_root iptables -t nat -A "$IPTABLES_CHAIN" -d 0.0.0.0/8 -j RETURN
+    run_root iptables -t nat -A "$IPTABLES_CHAIN" -d 10.0.0.0/8 -j RETURN
+    run_root iptables -t nat -A "$IPTABLES_CHAIN" -d 100.64.0.0/10 -j RETURN
+    run_root iptables -t nat -A "$IPTABLES_CHAIN" -d 127.0.0.0/8 -j RETURN
+    run_root iptables -t nat -A "$IPTABLES_CHAIN" -d 169.254.0.0/16 -j RETURN
+    run_root iptables -t nat -A "$IPTABLES_CHAIN" -d 172.16.0.0/12 -j RETURN
+    run_root iptables -t nat -A "$IPTABLES_CHAIN" -d 192.168.0.0/16 -j RETURN
+    run_root iptables -t nat -A "$IPTABLES_CHAIN" -d 224.0.0.0/4 -j RETURN
+    run_root iptables -t nat -A "$IPTABLES_CHAIN" -d 240.0.0.0/4 -j RETURN
+
+    if [ -n "$REMOTE_HOST" ]; then
+        run_root iptables -t nat -A "$IPTABLES_CHAIN" -p tcp -d "$REMOTE_HOST" --dport "$REMOTE_PORT" -j RETURN 2>/dev/null || true
+    fi
+
+    run_root iptables -t nat -A "$IPTABLES_CHAIN" -p tcp -j REDIRECT --to-ports "$REDSOCKS_PORT"
+    iptables_insert_once OUTPUT -p tcp -j "$IPTABLES_CHAIN"
+    iptables_insert_once PREROUTING -i docker0 -p tcp -j "$IPTABLES_CHAIN"
+    iptables_insert_once PREROUTING -i br+ -p tcp -j "$IPTABLES_CHAIN"
+}
+
+clear_iptables_global() {
+    if ! command -v iptables >/dev/null 2>&1; then
+        return 0
+    fi
+
+    while run_root iptables -t nat -C OUTPUT -p tcp -j "$IPTABLES_CHAIN" >/dev/null 2>&1; do
+        run_root iptables -t nat -D OUTPUT -p tcp -j "$IPTABLES_CHAIN" || break
+    done
+
+    while run_root iptables -t nat -C PREROUTING -p tcp -j "$IPTABLES_CHAIN" >/dev/null 2>&1; do
+        run_root iptables -t nat -D PREROUTING -p tcp -j "$IPTABLES_CHAIN" || break
+    done
+
+    while run_root iptables -t nat -C PREROUTING -i docker0 -p tcp -j "$IPTABLES_CHAIN" >/dev/null 2>&1; do
+        run_root iptables -t nat -D PREROUTING -i docker0 -p tcp -j "$IPTABLES_CHAIN" || break
+    done
+
+    while run_root iptables -t nat -C PREROUTING -i br+ -p tcp -j "$IPTABLES_CHAIN" >/dev/null 2>&1; do
+        run_root iptables -t nat -D PREROUTING -i br+ -p tcp -j "$IPTABLES_CHAIN" || break
+    done
+
+    run_root iptables -t nat -F "$IPTABLES_CHAIN" >/dev/null 2>&1 || true
+    run_root iptables -t nat -X "$IPTABLES_CHAIN" >/dev/null 2>&1 || true
+}
+
+global_start() {
+    load_config
+
+    if ! global_requirements_ok; then
+        return 1
+    fi
+
+    start || return 1
+    start_redsocks || {
+        echo "❌ redsocks 启动失败"
+        return 1
+    }
+
+    clear_iptables_global
+    setup_iptables_global || {
+        echo "❌ iptables 规则设置失败，正在回滚"
+        clear_iptables_global
+        return 1
+    }
+
+    echo "🌐 Linux 全局模式已启动"
+    echo "   TCP 流量会经 redsocks:$REDSOCKS_PORT 转发到 SOCKS5:$LOCAL_PORT"
+    echo "   Docker bridge 容器的 TCP 流量也会尝试走代理；UDP/DNS 不属于此模式覆盖范围。"
+}
+
+global_stop() {
+    load_config
+    clear_iptables_global
+
+    if [ -f "$REDSOCKS_PID_FILE" ]; then
+        kill "$(cat "$REDSOCKS_PID_FILE")" 2>/dev/null
+        rm -f "$REDSOCKS_PID_FILE"
+    fi
+    pkill -f "redsocks.*$REDSOCKS_CONF_FILE" 2>/dev/null
+    rm -f "$REDSOCKS_CONF_FILE"
+
+    echo "🌐 Linux 全局模式已关闭"
+}
+
+global_status() {
+    load_config
+    echo ""
+    if is_termux; then
+        echo "⚫ Linux 全局模式：当前环境为 Termux，未启用"
+        echo ""
+        return 0
+    fi
+
+    if [ -f "$REDSOCKS_PID_FILE" ] && kill -0 "$(cat "$REDSOCKS_PID_FILE")" 2>/dev/null; then
+        echo "🟢 redsocks 运行中 (PID: $(cat "$REDSOCKS_PID_FILE"))"
+    else
+        echo "⚫ redsocks 未运行"
+    fi
+
+    if command -v iptables >/dev/null 2>&1 && run_root iptables -t nat -S "$IPTABLES_CHAIN" >/dev/null 2>&1; then
+        echo "🟢 iptables 透明代理链存在：$IPTABLES_CHAIN"
+    else
+        echo "⚫ iptables 透明代理链不存在"
+    fi
+    echo ""
 }
 
 status() {
@@ -171,6 +373,7 @@ configure() {
     echo "  主机 IP : ${REMOTE_HOST:-（未设置）}"
     echo "  SSH 端口: $REMOTE_PORT"
     echo "  本地端口: $LOCAL_PORT"
+    echo "  全局转发端口: $REDSOCKS_PORT"
     echo ""
     echo "直接回车保留原值"
     echo ""
@@ -186,6 +389,9 @@ configure() {
 
     read -p "本地 SOCKS5 端口 [$LOCAL_PORT]: " input
     LOCAL_PORT="${input:-$LOCAL_PORT}"
+
+    read -p "Linux 全局模式转发端口 [$REDSOCKS_PORT]: " input
+    REDSOCKS_PORT="${input:-$REDSOCKS_PORT}"
 
     save_config
     echo ""
@@ -299,6 +505,9 @@ menu() {
         echo "║  4. 修改配置 (IP / 端口)      ║"
         echo "║  5. 修改别名                  ║"
         echo "║  6. 上传 SSH 密钥             ║"
+        echo "║  7. Linux 全局模式开启        ║"
+        echo "║  8. Linux 全局模式关闭        ║"
+        echo "║  9. Linux 全局模式状态        ║"
         echo "║  0. 退出                      ║"
         echo "╚═══════════════════════════════╝"
         echo ""
@@ -310,6 +519,9 @@ menu() {
             4) configure ;;
             5) setup_aliases ;;
             6) setup_ssh_key ;;
+            7) global_start ;;
+            8) global_stop ;;
+            9) global_status ;;
             0) break ;;
             *) echo "无效选项" ;;
         esac
@@ -340,6 +552,9 @@ case "$1" in
     start)  load_config; start  ;;
     stop)   load_config; stop   ;;
     status) load_config; status ;;
+    global-on|global-start) load_config; global_start ;;
+    global-off|global-stop) load_config; global_stop ;;
+    global-status) load_config; global_status ;;
     menu)   menu ;;
     init)   init ;;
     *)
