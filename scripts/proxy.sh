@@ -51,6 +51,7 @@ notify_disconnected() {
 
 start_monitor() {
     local ssh_pid="$1"
+    local monitor_pid
 
     if [ -f "$MONITOR_PID_FILE" ]; then
         kill "$(cat "$MONITOR_PID_FILE")" 2>/dev/null
@@ -78,7 +79,9 @@ start_monitor() {
         done
     ) &
 
-    echo "$!" > "$MONITOR_PID_FILE"
+    monitor_pid="$!"
+    disown "$monitor_pid" 2>/dev/null
+    echo "$monitor_pid" > "$MONITOR_PID_FILE"
 }
 
 start() {
