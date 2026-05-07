@@ -8,6 +8,18 @@ SCRIPTS_DIR="scripts"
 BASE_URL="https://raw.githubusercontent.com/$GITHUB_USER/$GITHUB_REPO/$GITHUB_BRANCH/$SCRIPTS_DIR"
 API_URL="https://api.github.com/repos/$GITHUB_USER/$GITHUB_REPO/contents/$SCRIPTS_DIR?ref=$GITHUB_BRANCH"
 INSTALL_DIR="$HOME"
+TTY="/dev/tty"
+
+prompt() {
+    local var="$1"
+    local text="$2"
+
+    if [ -r "$TTY" ]; then
+        read -r -p "$text" "$var" < "$TTY"
+    else
+        read -r -p "$text" "$var"
+    fi
+}
 
 # ─── 从 GitHub API 拉取脚本列表 ──────────────────
 fetch_scripts() {
@@ -54,7 +66,11 @@ install_script() {
     chmod +x "$target"
     if [ "$filename" = "proxy.sh" ]; then
         echo "🔧 初始化 $filename ..."
-        source "$target" init
+        if [ -r "$TTY" ]; then
+            source "$target" init < "$TTY"
+        else
+            source "$target" init
+        fi
     fi
     echo "✅ $filename 安装完成"
     echo ""
@@ -62,31 +78,36 @@ install_script() {
 
 # ─── 主流程 ──────────────────────────────────────
 main() {
+    local choice
+
     fetch_scripts
-    print_menu
 
-    read -p "请选择: " choice
+    while true; do
+        print_menu
+        prompt choice "请选择: "
 
-    case "$choice" in
-        0)
-            exit 0
-            ;;
-        a)
-            for script in "${SCRIPTS[@]}"; do
-                install_script "$script"
-            done
-            ;;
-        *)
-            if [[ "$choice" =~ ^[0-9]+$ ]] && \
-               [ "$choice" -ge 1 ] && \
-               [ "$choice" -le "${#SCRIPTS[@]}" ]; then
-                install_script "${SCRIPTS[$((choice-1))]}"
-            else
-                echo "❌ 无效选项"
-                main
-            fi
-            ;;
-    esac
+        case "$choice" in
+            0)
+                exit 0
+                ;;
+            a)
+                for script in "${SCRIPTS[@]}"; do
+                    install_script "$script"
+                done
+                break
+                ;;
+            *)
+                if [[ "$choice" =~ ^[0-9]+$ ]] && \
+                   [ "$choice" -ge 1 ] && \
+                   [ "$choice" -le "${#SCRIPTS[@]}" ]; then
+                    install_script "${SCRIPTS[$((choice-1))]}"
+                    break
+                else
+                    echo "❌ 无效选项"
+                fi
+                ;;
+        esac
+    done
 }
 
 main
