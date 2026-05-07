@@ -1,4 +1,4 @@
-```markdown
+
 # 🧰 Toolbox
 
 个人脚本工具箱，新机器一行命令安装。
@@ -19,5 +19,3 @@ https://raw.githubusercontent.com/xiu14/toolbox/main/install.sh)
 ## 使用说明
 
 安装后按提示完成初始化配置即可。
-```
-
