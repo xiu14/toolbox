@@ -183,18 +183,56 @@ global_requirements_ok() {
         return 1
     fi
 
-    if ! command -v redsocks >/dev/null 2>&1; then
-        echo "❌ 缺少 redsocks"
-        echo "   Debian/Ubuntu: sudo apt install redsocks"
-        echo "   Arch: sudo pacman -S redsocks"
-        return 1
-    fi
-
     if ! command -v iptables >/dev/null 2>&1; then
         echo "❌ 缺少 iptables"
         return 1
     fi
 
+    return 0
+}
+
+install_redsocks_if_missing() {
+    if command -v redsocks >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if ! command -v apt >/dev/null 2>&1; then
+        echo "❌ 缺少 redsocks，且当前系统没有 apt，无法自动安装"
+        echo "   请手动安装 redsocks 后再启动全局模式"
+        return 1
+    fi
+
+    echo "📦 未检测到 redsocks，先启动普通 SSH 代理以便 apt 联网..."
+    start || return 1
+
+    echo "📦 正在安装 redsocks ..."
+    if [ "$(id -u)" -eq 0 ]; then
+        apt install redsocks -y
+    elif command -v sudo >/dev/null 2>&1; then
+        sudo env \
+            http_proxy="$http_proxy" \
+            https_proxy="$https_proxy" \
+            all_proxy="$all_proxy" \
+            HTTP_PROXY="$HTTP_PROXY" \
+            HTTPS_PROXY="$HTTPS_PROXY" \
+            ALL_PROXY="$ALL_PROXY" \
+            apt install redsocks -y
+    else
+        echo "❌ 安装 redsocks 需要 root 权限或 sudo"
+        return 1
+    fi
+
+    if [ $? -ne 0 ]; then
+        echo "❌ redsocks 安装失败"
+        return 1
+    fi
+
+    if ! command -v redsocks >/dev/null 2>&1; then
+        echo "❌ redsocks 安装完成后仍不可用，请检查 PATH"
+        return 1
+    fi
+
+    echo "✅ redsocks 安装完成"
     return 0
 }
 
@@ -219,14 +257,48 @@ EOF
 }
 
 start_redsocks() {
+    cleanup_redsocks_runtime
+    write_redsocks_config
+    redsocks -c "$REDSOCKS_CONF_FILE" -p "$REDSOCKS_PID_FILE"
+}
+
+kill_redsocks_port() {
+    local pids
+
+    if command -v fuser >/dev/null 2>&1; then
+        if [ "$(id -u)" -eq 0 ]; then
+            fuser -k "${REDSOCKS_PORT}/tcp" >/dev/null 2>&1 || true
+        elif command -v sudo >/dev/null 2>&1; then
+            sudo fuser -k "${REDSOCKS_PORT}/tcp" >/dev/null 2>&1 || true
+        else
+            fuser -k "${REDSOCKS_PORT}/tcp" >/dev/null 2>&1 || true
+        fi
+        return 0
+    fi
+
+    if command -v lsof >/dev/null 2>&1; then
+        pids="$(lsof -tiTCP:"$REDSOCKS_PORT" -sTCP:LISTEN 2>/dev/null)"
+        if [ -n "$pids" ]; then
+            if [ "$(id -u)" -eq 0 ]; then
+                kill $pids 2>/dev/null || true
+            elif command -v sudo >/dev/null 2>&1; then
+                sudo kill $pids 2>/dev/null || true
+            else
+                kill $pids 2>/dev/null || true
+            fi
+        fi
+    fi
+}
+
+cleanup_redsocks_runtime() {
     if [ -f "$REDSOCKS_PID_FILE" ]; then
         kill "$(cat "$REDSOCKS_PID_FILE")" 2>/dev/null
         rm -f "$REDSOCKS_PID_FILE"
     fi
 
-    pkill -f "redsocks.*$REDSOCKS_CONF_FILE" 2>/dev/null
-    write_redsocks_config
-    redsocks -c "$REDSOCKS_CONF_FILE" -p "$REDSOCKS_PID_FILE"
+    pkill -f redsocks 2>/dev/null
+    kill_redsocks_port
+    sleep 1
 }
 
 iptables_insert_once() {
@@ -286,12 +358,21 @@ clear_iptables_global() {
 
 global_start() {
     load_config
+    local proxy_started=0
 
     if ! global_requirements_ok; then
         return 1
     fi
 
-    start || return 1
+    if ! command -v redsocks >/dev/null 2>&1; then
+        install_redsocks_if_missing || return 1
+        proxy_started=1
+    fi
+
+    if [ "$proxy_started" -eq 0 ]; then
+        start || return 1
+    fi
+
     start_redsocks || {
         echo "❌ redsocks 启动失败"
         return 1
@@ -312,12 +393,7 @@ global_start() {
 global_stop() {
     load_config
     clear_iptables_global
-
-    if [ -f "$REDSOCKS_PID_FILE" ]; then
-        kill "$(cat "$REDSOCKS_PID_FILE")" 2>/dev/null
-        rm -f "$REDSOCKS_PID_FILE"
-    fi
-    pkill -f "redsocks.*$REDSOCKS_CONF_FILE" 2>/dev/null
+    cleanup_redsocks_runtime
     rm -f "$REDSOCKS_CONF_FILE"
 
     echo "🌐 Linux 全局模式已关闭"
