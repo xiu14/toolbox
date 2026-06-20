@@ -14,6 +14,9 @@ curl -fsSL https://raw.githubusercontent.com/xiu14/toolbox/main/install.sh | bas
 | 脚本 | 描述 |
 |------|------|
 | proxy.sh | SSH 代理管理器 |
+| deploy-st.sh | SillyTavern 部署 / 清理工具 |
+| upload.sh | 输入 Cloudflare R2 信息后打包并上传 /root 备份 |
+| restore.sh | 输入 Cloudflare R2 信息后下载并恢复 /root 备份 |
 
 ## 使用说明
 

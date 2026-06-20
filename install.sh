@@ -72,6 +72,19 @@ install_script() {
             source "$target" init
         fi
     fi
+    if [ "$filename" = "upload.sh" ] || [ "$filename" = "restore.sh" ]; then
+        local run_script
+        prompt run_script "是否立即启动 $filename？[y/N]: "
+        case "$run_script" in
+            y|Y|yes|YES)
+                if [ -r "$TTY" ]; then
+                    "$target" < "$TTY"
+                else
+                    "$target"
+                fi
+                ;;
+        esac
+    fi
     echo "✅ $filename 安装完成"
     echo ""
 }
